@@ -21,6 +21,9 @@ static PyObject *
 _PyErr_FormatV(PyThreadState *tstate, PyObject *exception,
                const char *format, va_list vargs);
 
+static const char*
+_PyErr_GetLocalizedException(PyThreadState* tstate, const char* message);
+
 void
 _PyErr_SetRaisedException(PyThreadState *tstate, PyObject *exc)
 {
@@ -285,7 +288,7 @@ void
 _PyErr_SetString(PyThreadState *tstate, PyObject *exception,
                  const char *string)
 {
-    PyObject *value = PyUnicode_FromString(string);
+    PyObject *value = PyUnicode_FromString(_PyErr_GetLocalizedException(tstate, string));
     if (value != NULL) {
         _PyErr_SetObject(tstate, exception, value);
         Py_DECREF(value);
@@ -1147,6 +1150,35 @@ PyErr_BadInternalCall(void)
 }
 #define PyErr_BadInternalCall() _PyErr_BadInternalCall(__FILE__, __LINE__)
 
+static const char* _PyErr_GetLocalizedException(PyThreadState *tstate, const char* message) {
+    if (tstate->interp->config.language == NULL)
+        return message;
+
+    PyObject* exception_dict = PySys_GetObject("localized_exceptions");
+    if (exception_dict == NULL) {
+        return message;
+    }
+
+    PyObject* lang = PyUnicode_FromWideChar(tstate->interp->config.language, wcslen(tstate->interp->config.language));
+    if (lang == NULL) {
+        return message;
+    }
+
+    // Get lang dict
+    PyObject* lang_dict = PyDict_GetItem(exception_dict, lang);
+    Py_XDECREF(lang);
+    if (lang_dict == NULL) {
+        return message;
+    }
+
+    // Get entry for string
+    PyObject* entry = PyDict_GetItemString(lang_dict, message);
+    if (entry == NULL) {
+        return message;
+    }
+
+    return PyUnicode_AsUTF8(entry);
+}
 
 static PyObject *
 _PyErr_FormatV(PyThreadState *tstate, PyObject *exception,
@@ -1158,7 +1190,8 @@ _PyErr_FormatV(PyThreadState *tstate, PyObject *exception,
        exception set, it calls arbitrary Python code like PyObject_Repr() */
     _PyErr_Clear(tstate);
 
-    string = PyUnicode_FromFormatV(format, vargs);
+    string = PyUnicode_FromFormatV(_PyErr_GetLocalizedException(tstate, format), vargs);
+
     if (string != NULL) {
         _PyErr_SetObject(tstate, exception, string);
         Py_DECREF(string);
