@@ -1,7 +1,7 @@
 import doctest
 import unittest
 from test import support
-from test.support import threading_helper
+from test.support import threading_helper, script_helper
 from itertools import *
 import weakref
 from decimal import Decimal
@@ -187,7 +187,11 @@ class TestBasicOps(unittest.TestCase):
                              [('A', 'B'), ('C', 'D'), ('E', 'F'), ('G',)])
         self.assertEqual(list(batched('ABCDEFG', 1)),
                             [('A',), ('B',), ('C',), ('D',), ('E',), ('F',), ('G',)])
+        self.assertEqual(list(batched('ABCDEF', 2, strict=True)),
+                             [('A', 'B'), ('C', 'D'), ('E', 'F')])
 
+        with self.assertRaises(ValueError):         # Incomplete batch when strict
+            list(batched('ABCDEFG', 3, strict=True))
         with self.assertRaises(TypeError):          # Too few arguments
             list(batched('ABCDEFG'))
         with self.assertRaises(TypeError):
@@ -640,7 +644,7 @@ class TestBasicOps(unittest.TestCase):
         count(1, maxsize+5); sys.exc_info()
 
     @pickle_deprecated
-    def test_count_with_stride(self):
+    def test_count_with_step(self):
         self.assertEqual(lzip('abc',count(2,3)), [('a', 2), ('b', 5), ('c', 8)])
         self.assertEqual(lzip('abc',count(start=2,step=3)),
                          [('a', 2), ('b', 5), ('c', 8)])
@@ -694,6 +698,28 @@ class TestBasicOps(unittest.TestCase):
                 self.assertEqual(r1, r2)
                 for proto in range(pickle.HIGHEST_PROTOCOL + 1):
                     self.pickletest(proto, count(i, j))
+
+    @threading_helper.requires_working_threading()
+    def test_count_threading(self, step=1):
+        # this test verifies multithreading consistency, which is
+        # mostly for testing builds without GIL, but nice to test anyway
+        count_to = 10_000
+        num_threads = 10
+        c = count(step=step)
+        def counting_thread():
+            for i in range(count_to):
+                next(c)
+        threads = []
+        for i in range(num_threads):
+            thread = threading.Thread(target=counting_thread)
+            thread.start()
+            threads.append(thread)
+        for thread in threads:
+            thread.join()
+        self.assertEqual(next(c), count_to * num_threads * step)
+
+    def test_count_with_step_threading(self):
+        self.test_count_threading(step=5)
 
     def test_cycle(self):
         self.assertEqual(take(10, cycle('abc')), list('abcabcabca'))
@@ -1152,6 +1178,78 @@ class TestBasicOps(unittest.TestCase):
         with self.assertRaises(TypeError):
             pairwise(None)                                  # non-iterable argument
 
+    def test_pairwise_reenter(self):
+        def check(reenter_at, expected):
+            class I:
+                count = 0
+                def __iter__(self):
+                    return self
+                def __next__(self):
+                    self.count +=1
+                    if self.count in reenter_at:
+                        return next(it)
+                    return [self.count]  # new object
+
+            it = pairwise(I())
+            for item in expected:
+                self.assertEqual(next(it), item)
+
+        check({1}, [
+            (([2], [3]), [4]),
+            ([4], [5]),
+        ])
+        check({2}, [
+            ([1], ([1], [3])),
+            (([1], [3]), [4]),
+            ([4], [5]),
+        ])
+        check({3}, [
+            ([1], [2]),
+            ([2], ([2], [4])),
+            (([2], [4]), [5]),
+            ([5], [6]),
+        ])
+        check({1, 2}, [
+            ((([3], [4]), [5]), [6]),
+            ([6], [7]),
+        ])
+        check({1, 3}, [
+            (([2], ([2], [4])), [5]),
+            ([5], [6]),
+        ])
+        check({1, 4}, [
+            (([2], [3]), (([2], [3]), [5])),
+            ((([2], [3]), [5]), [6]),
+            ([6], [7]),
+        ])
+        check({2, 3}, [
+            ([1], ([1], ([1], [4]))),
+            (([1], ([1], [4])), [5]),
+            ([5], [6]),
+        ])
+
+    def test_pairwise_reenter2(self):
+        def check(maxcount, expected):
+            class I:
+                count = 0
+                def __iter__(self):
+                    return self
+                def __next__(self):
+                    if self.count >= maxcount:
+                        raise StopIteration
+                    self.count +=1
+                    if self.count == 1:
+                        return next(it, None)
+                    return [self.count]  # new object
+
+            it = pairwise(I())
+            self.assertEqual(list(it), expected)
+
+        check(1, [])
+        check(2, [])
+        check(3, [])
+        check(4, [(([2], [3]), [4])])
+
     def test_product(self):
         for args, result in [
             ([], [()]),                     # zero iterables
@@ -1190,12 +1288,16 @@ class TestBasicOps(unittest.TestCase):
                 else:
                     return
 
-        def product2(*args, **kwds):
+        def product2(*iterables, repeat=1):
             'Pure python version used in docs'
-            pools = list(map(tuple, args)) * kwds.get('repeat', 1)
+            if repeat < 0:
+                raise ValueError('repeat argument cannot be negative')
+            pools = [tuple(pool) for pool in iterables] * repeat
+
             result = [[]]
             for pool in pools:
                 result = [x+[y] for x in result for y in pool]
+
             for prod in result:
                 yield tuple(prod)
 
@@ -1540,10 +1642,11 @@ class TestBasicOps(unittest.TestCase):
             self.assertEqual(len(result), n)
             self.assertEqual([list(x) for x in result], [list('abc')]*n)
 
-        # tee pass-through to copyable iterator
+        # tee objects are independent (see bug gh-123884)
         a, b = tee('abc')
         c, d = tee(a)
-        self.assertTrue(a is c)
+        e, f = tee(c)
+        self.assertTrue(len({a, b, c, d, e, f}) == 6)
 
         # test tee_new
         t1, t2 = tee('abc')
@@ -1622,6 +1725,14 @@ class TestBasicOps(unittest.TestCase):
             a, b = tee('abc')
             self.pickletest(proto, a, compare=ans)
             self.pickletest(proto, b, compare=ans)
+
+    def test_tee_dealloc_segfault(self):
+        # gh-115874: segfaults when accessing module state in tp_dealloc.
+        script = (
+            "import typing, copyreg, itertools; "
+            "copyreg.buggy_tee = itertools.tee(())"
+        )
+        script_helper.assert_python_ok("-c", script)
 
     # Issue 13454: Crash when deleting backward iterator from tee()
     def test_tee_del_backward(self):
@@ -1734,6 +1845,13 @@ class TestBasicOps(unittest.TestCase):
     def test_zip_longest_result_gc(self):
         # Ditto for zip_longest.
         it = zip_longest([[]])
+        gc.collect()
+        self.assertTrue(gc.is_tracked(next(it)))
+
+    @support.cpython_only
+    def test_pairwise_result_gc(self):
+        # Ditto for pairwise.
+        it = pairwise([None, None])
         gc.collect()
         self.assertTrue(gc.is_tracked(next(it)))
 
@@ -1947,6 +2065,172 @@ class TestPurePythonRoughEquivalents(unittest.TestCase):
         c = count()
         self.assertEqual(list(self.islice(c, 1, 3, 50)), [1])
         self.assertEqual(next(c), 3)
+
+
+    def test_tee_recipe(self):
+
+        # Begin tee() recipe ###########################################
+
+        def tee(iterable, n=2):
+            if n < 0:
+                raise ValueError
+            if n == 0:
+                return ()
+            iterator = _tee(iterable)
+            result = [iterator]
+            for _ in range(n - 1):
+                result.append(_tee(iterator))
+            return tuple(result)
+
+        class _tee:
+
+            def __init__(self, iterable):
+                it = iter(iterable)
+                if isinstance(it, _tee):
+                    self.iterator = it.iterator
+                    self.link = it.link
+                else:
+                    self.iterator = it
+                    self.link = [None, None]
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                link = self.link
+                if link[1] is None:
+                    link[0] = next(self.iterator)
+                    link[1] = [None, None]
+                value, self.link = link
+                return value
+
+        # End tee() recipe #############################################
+
+        n = 200
+
+        a, b = tee([])        # test empty iterator
+        self.assertEqual(list(a), [])
+        self.assertEqual(list(b), [])
+
+        a, b = tee(irange(n)) # test 100% interleaved
+        self.assertEqual(lzip(a,b), lzip(range(n), range(n)))
+
+        a, b = tee(irange(n)) # test 0% interleaved
+        self.assertEqual(list(a), list(range(n)))
+        self.assertEqual(list(b), list(range(n)))
+
+        a, b = tee(irange(n)) # test dealloc of leading iterator
+        for i in range(100):
+            self.assertEqual(next(a), i)
+        del a
+        self.assertEqual(list(b), list(range(n)))
+
+        a, b = tee(irange(n)) # test dealloc of trailing iterator
+        for i in range(100):
+            self.assertEqual(next(a), i)
+        del b
+        self.assertEqual(list(a), list(range(100, n)))
+
+        for j in range(5):   # test randomly interleaved
+            order = [0]*n + [1]*n
+            random.shuffle(order)
+            lists = ([], [])
+            its = tee(irange(n))
+            for i in order:
+                value = next(its[i])
+                lists[i].append(value)
+            self.assertEqual(lists[0], list(range(n)))
+            self.assertEqual(lists[1], list(range(n)))
+
+        # test argument format checking
+        self.assertRaises(TypeError, tee)
+        self.assertRaises(TypeError, tee, 3)
+        self.assertRaises(TypeError, tee, [1,2], 'x')
+        self.assertRaises(TypeError, tee, [1,2], 3, 'x')
+
+        # tee object should be instantiable
+        a, b = tee('abc')
+        c = type(a)('def')
+        self.assertEqual(list(c), list('def'))
+
+        # test long-lagged and multi-way split
+        a, b, c = tee(range(2000), 3)
+        for i in range(100):
+            self.assertEqual(next(a), i)
+        self.assertEqual(list(b), list(range(2000)))
+        self.assertEqual([next(c), next(c)], list(range(2)))
+        self.assertEqual(list(a), list(range(100,2000)))
+        self.assertEqual(list(c), list(range(2,2000)))
+
+        # test invalid values of n
+        self.assertRaises(TypeError, tee, 'abc', 'invalid')
+        self.assertRaises(ValueError, tee, [], -1)
+
+        for n in range(5):
+            result = tee('abc', n)
+            self.assertEqual(type(result), tuple)
+            self.assertEqual(len(result), n)
+            self.assertEqual([list(x) for x in result], [list('abc')]*n)
+
+        # tee objects are independent (see bug gh-123884)
+        a, b = tee('abc')
+        c, d = tee(a)
+        e, f = tee(c)
+        self.assertTrue(len({a, b, c, d, e, f}) == 6)
+
+        # test tee_new
+        t1, t2 = tee('abc')
+        tnew = type(t1)
+        self.assertRaises(TypeError, tnew)
+        self.assertRaises(TypeError, tnew, 10)
+        t3 = tnew(t1)
+        self.assertTrue(list(t1) == list(t2) == list(t3) == list('abc'))
+
+        # test that tee objects are weak referencable
+        a, b = tee(range(10))
+        p = weakref.proxy(a)
+        self.assertEqual(getattr(p, '__class__'), type(b))
+        del a
+        gc.collect()  # For PyPy or other GCs.
+        self.assertRaises(ReferenceError, getattr, p, '__class__')
+
+        ans = list('abc')
+        long_ans = list(range(10000))
+
+        # Tests not applicable to the tee() recipe
+        if False:
+            # check copy
+            a, b = tee('abc')
+            self.assertEqual(list(copy.copy(a)), ans)
+            self.assertEqual(list(copy.copy(b)), ans)
+            a, b = tee(list(range(10000)))
+            self.assertEqual(list(copy.copy(a)), long_ans)
+            self.assertEqual(list(copy.copy(b)), long_ans)
+
+            # check partially consumed copy
+            a, b = tee('abc')
+            take(2, a)
+            take(1, b)
+            self.assertEqual(list(copy.copy(a)), ans[2:])
+            self.assertEqual(list(copy.copy(b)), ans[1:])
+            self.assertEqual(list(a), ans[2:])
+            self.assertEqual(list(b), ans[1:])
+            a, b = tee(range(10000))
+            take(100, a)
+            take(60, b)
+            self.assertEqual(list(copy.copy(a)), long_ans[100:])
+            self.assertEqual(list(copy.copy(b)), long_ans[60:])
+            self.assertEqual(list(a), long_ans[100:])
+            self.assertEqual(list(b), long_ans[60:])
+
+        # Issue 13454: Crash when deleting backward iterator from tee()
+        forward, backward = tee(repeat(None, 2000)) # 20000000
+        try:
+            any(forward)  # exhaust the iterator
+            del backward
+        except:
+            del forward, backward
+            raise
 
 
 class TestGC(unittest.TestCase):

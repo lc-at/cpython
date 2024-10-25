@@ -128,7 +128,7 @@ static const char PyCursesVersion[] = "2.2";
 #include <langinfo.h>
 #endif
 
-#if !defined(HAVE_NCURSES_H) && (defined(sgi) || defined(__sun) || defined(SCO5))
+#if !defined(NCURSES_VERSION) && (defined(sgi) || defined(__sun) || defined(SCO5))
 #define STRICT_SYSV_CURSES       /* Don't use ncurses extensions */
 typedef chtype attr_t;           /* No attr_t type is available */
 #endif
@@ -1156,8 +1156,10 @@ int py_mvwdelch(WINDOW *w, int y, int x)
 #endif
 
 #if defined(HAVE_CURSES_IS_PAD)
+// is_pad() is defined, either as a macro or as a function
 #define py_is_pad(win)      is_pad(win)
 #elif defined(WINDOW_HAS_FLAGS)
+// is_pad() is not defined, but we can inspect WINDOW structure members
 #define py_is_pad(win)      ((win) ? ((win)->_flags & _ISPAD) != 0 : FALSE)
 #endif
 
@@ -4069,9 +4071,9 @@ NoArgNoReturnFunctionBody(resetty)
 /*[clinic input]
 _curses.resizeterm
 
-    nlines: int
+    nlines: short
         Height.
-    ncols: int
+    ncols: short
         Width.
     /
 
@@ -4082,8 +4084,8 @@ window dimensions (in particular the SIGWINCH handler).
 [clinic start generated code]*/
 
 static PyObject *
-_curses_resizeterm_impl(PyObject *module, int nlines, int ncols)
-/*[clinic end generated code: output=56d6bcc5194ad055 input=0fca02ebad5ffa82]*/
+_curses_resizeterm_impl(PyObject *module, short nlines, short ncols)
+/*[clinic end generated code: output=4de3abab50c67f02 input=414e92a63e3e9899]*/
 {
     PyObject *result;
 
@@ -4105,9 +4107,9 @@ _curses_resizeterm_impl(PyObject *module, int nlines, int ncols)
 /*[clinic input]
 _curses.resize_term
 
-    nlines: int
+    nlines: short
         Height.
-    ncols: int
+    ncols: short
         Width.
     /
 
@@ -4121,8 +4123,8 @@ without additional interaction with the application.
 [clinic start generated code]*/
 
 static PyObject *
-_curses_resize_term_impl(PyObject *module, int nlines, int ncols)
-/*[clinic end generated code: output=9e26d8b9ea311ed2 input=2197edd05b049ed4]*/
+_curses_resize_term_impl(PyObject *module, short nlines, short ncols)
+/*[clinic end generated code: output=46c6d749fa291dbd input=276afa43d8ea7091]*/
 {
     PyObject *result;
 
@@ -4586,7 +4588,14 @@ make_ncurses_version(PyTypeObject *type)
     if (ncurses_version == NULL) {
         return NULL;
     }
-
+    const char *str = curses_version();
+    unsigned long major = 0, minor = 0, patch = 0;
+    if (!str || sscanf(str, "%*[^0-9]%lu.%lu.%lu", &major, &minor, &patch) < 3) {
+        // Fallback to header version, which cannot be that wrong
+        major = NCURSES_VERSION_MAJOR;
+        minor = NCURSES_VERSION_MINOR;
+        patch = NCURSES_VERSION_PATCH;
+    }
 #define SetIntItem(flag) \
     PyStructSequence_SET_ITEM(ncurses_version, pos++, PyLong_FromLong(flag)); \
     if (PyErr_Occurred()) { \
@@ -4594,9 +4603,9 @@ make_ncurses_version(PyTypeObject *type)
         return NULL; \
     }
 
-    SetIntItem(NCURSES_VERSION_MAJOR)
-    SetIntItem(NCURSES_VERSION_MINOR)
-    SetIntItem(NCURSES_VERSION_PATCH)
+    SetIntItem(major)
+    SetIntItem(minor)
+    SetIntItem(patch)
 #undef SetIntItem
 
     return ncurses_version;
@@ -4743,6 +4752,9 @@ PyInit__curses(void)
     m = PyModule_Create(&_cursesmodule);
     if (m == NULL)
         return NULL;
+#ifdef Py_GIL_DISABLED
+    PyUnstable_Module_SetGIL(m, Py_MOD_GIL_NOT_USED);
+#endif
 
     /* Add some symbolic constants to the module */
     d = PyModule_GetDict(m);

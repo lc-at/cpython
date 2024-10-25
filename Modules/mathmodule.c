@@ -107,7 +107,7 @@ typedef struct{ double hi; double lo; } DoubleLength;
 static DoubleLength
 dl_fast_sum(double a, double b)
 {
-    /* Algorithm 1.1. Compensated summation of two floating point numbers. */
+    /* Algorithm 1.1. Compensated summation of two floating-point numbers. */
     assert(fabs(a) >= fabs(b));
     double x = a + b;
     double y = (a - x) + b;
@@ -759,13 +759,17 @@ m_log10(double x)
 static PyObject *
 math_gcd(PyObject *module, PyObject * const *args, Py_ssize_t nargs)
 {
-    PyObject *res, *x;
-    Py_ssize_t i;
+    // Fast-path for the common case: gcd(int, int)
+    if (nargs == 2 && PyLong_CheckExact(args[0]) && PyLong_CheckExact(args[1]))
+    {
+        return _PyLong_GCD(args[0], args[1]);
+    }
 
     if (nargs == 0) {
         return PyLong_FromLong(0);
     }
-    res = PyNumber_Index(args[0]);
+
+    PyObject *res = PyNumber_Index(args[0]);
     if (res == NULL) {
         return NULL;
     }
@@ -775,8 +779,8 @@ math_gcd(PyObject *module, PyObject * const *args, Py_ssize_t nargs)
     }
 
     PyObject *one = _PyLong_GetOne();  // borrowed ref
-    for (i = 1; i < nargs; i++) {
-        x = _PyNumber_Index(args[i]);
+    for (Py_ssize_t i = 1; i < nargs; i++) {
+        PyObject *x = _PyNumber_Index(args[i]);
         if (x == NULL) {
             Py_DECREF(res);
             return NULL;
@@ -1249,7 +1253,7 @@ FUNC1(tanh, tanh, 0,
       "Return the hyperbolic tangent of x.")
 
 /* Precision summation function as msum() by Raymond Hettinger in
-   <http://aspn.activestate.com/ASPN/Cookbook/Python/Recipe/393090>,
+   <https://code.activestate.com/recipes/393090-binary-floating-point-summation-accurate-to-full-p/>,
    enhanced with the exact partials sum and roundoff from Mark
    Dickinson's post at <http://bugs.python.org/file10357/msum4.py>.
    See those links for more details, proofs and other references.
@@ -1350,14 +1354,14 @@ math.fsum
     seq: object
     /
 
-Return an accurate floating point sum of values in the iterable seq.
+Return an accurate floating-point sum of values in the iterable seq.
 
-Assumes IEEE-754 floating point arithmetic.
+Assumes IEEE-754 floating-point arithmetic.
 [clinic start generated code]*/
 
 static PyObject *
 math_fsum(PyObject *module, PyObject *seq)
-/*[clinic end generated code: output=ba5c672b87fe34fc input=c51b7d8caf6f6e82]*/
+/*[clinic end generated code: output=ba5c672b87fe34fc input=4506244ded6057dc]*/
 {
     PyObject *item, *iter, *sum = NULL;
     Py_ssize_t i, j, n = 0, m = NUM_PARTIALS;
@@ -2070,11 +2074,6 @@ math_trunc(PyObject *module, PyObject *x)
         return PyFloat_Type.tp_as_number->nb_int(x);
     }
 
-    if (!_PyType_IsReady(Py_TYPE(x))) {
-        if (PyType_Ready(Py_TYPE(x)) < 0)
-            return NULL;
-    }
-
     math_module_state *state = get_math_module_state(module);
     trunc = _PyObject_LookupSpecial(x, state->str___trunc__);
     if (trunc == NULL) {
@@ -2323,6 +2322,48 @@ math_log10(PyObject *module, PyObject *x)
 
 
 /*[clinic input]
+math.fma
+
+    x: double
+    y: double
+    z: double
+    /
+
+Fused multiply-add operation.
+
+Compute (x * y) + z with a single round.
+[clinic start generated code]*/
+
+static PyObject *
+math_fma_impl(PyObject *module, double x, double y, double z)
+/*[clinic end generated code: output=4fc8626dbc278d17 input=e3ad1f4a4c89626e]*/
+{
+    double r = fma(x, y, z);
+
+    /* Fast path: if we got a finite result, we're done. */
+    if (Py_IS_FINITE(r)) {
+        return PyFloat_FromDouble(r);
+    }
+
+    /* Non-finite result. Raise an exception if appropriate, else return r. */
+    if (Py_IS_NAN(r)) {
+        if (!Py_IS_NAN(x) && !Py_IS_NAN(y) && !Py_IS_NAN(z)) {
+            /* NaN result from non-NaN inputs. */
+            PyErr_SetString(PyExc_ValueError, "invalid operation in fma");
+            return NULL;
+        }
+    }
+    else if (Py_IS_FINITE(x) && Py_IS_FINITE(y) && Py_IS_FINITE(z)) {
+        /* Infinite result from finite inputs. */
+        PyErr_SetString(PyExc_OverflowError, "overflow in fma");
+        return NULL;
+    }
+
+    return PyFloat_FromDouble(r);
+}
+
+
+/*[clinic input]
 math.fmod
 
     x: double
@@ -2344,6 +2385,15 @@ math_fmod_impl(PyObject *module, double x, double y)
         return PyFloat_FromDouble(x);
     errno = 0;
     r = fmod(x, y);
+#ifdef _MSC_VER
+    /* Windows (e.g. Windows 10 with MSC v.1916) loose sign
+       for zero result.  But C99+ says: "if y is nonzero, the result
+       has the same sign as x".
+     */
+    if (r == 0.0 && y != 0.0) {
+        r = copysign(r, x);
+    }
+#endif
     if (Py_IS_NAN(r)) {
         if (!Py_IS_NAN(x) && !Py_IS_NAN(y))
             errno = EDOM;
@@ -2412,7 +2462,7 @@ Since lo**2 is less than 1/2 ulp(csum), we have csum+lo*lo == csum.
 To minimize loss of information during the accumulation of fractional
 values, each term has a separate accumulator.  This also breaks up
 sequential dependencies in the inner loop so the CPU can maximize
-floating point throughput. [4]  On an Apple M1 Max, hypot(*vec)
+floating-point throughput. [4]  On an Apple M1 Max, hypot(*vec)
 takes only 3.33 µsec when len(vec) == 1000.
 
 The square root differential correction is needed because a
@@ -2566,7 +2616,7 @@ math_dist_impl(PyObject *module, PyObject *p, PyObject *q)
         goto error_exit;
     }
     if (n > NUM_STACK_ELEMS) {
-        diffs = (double *) PyObject_Malloc(n * sizeof(double));
+        diffs = (double *) PyMem_Malloc(n * sizeof(double));
         if (diffs == NULL) {
             PyErr_NoMemory();
             goto error_exit;
@@ -2586,7 +2636,7 @@ math_dist_impl(PyObject *module, PyObject *p, PyObject *q)
     }
     result = vector_norm(n, diffs, max, found_nan);
     if (diffs != diffs_on_stack) {
-        PyObject_Free(diffs);
+        PyMem_Free(diffs);
     }
     if (p_allocated) {
         Py_DECREF(p);
@@ -2598,7 +2648,7 @@ math_dist_impl(PyObject *module, PyObject *p, PyObject *q)
 
   error_exit:
     if (diffs != diffs_on_stack) {
-        PyObject_Free(diffs);
+        PyMem_Free(diffs);
     }
     if (p_allocated) {
         Py_DECREF(p);
@@ -2622,7 +2672,7 @@ math_hypot(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
     double *coordinates = coord_on_stack;
 
     if (nargs > NUM_STACK_ELEMS) {
-        coordinates = (double *) PyObject_Malloc(nargs * sizeof(double));
+        coordinates = (double *) PyMem_Malloc(nargs * sizeof(double));
         if (coordinates == NULL) {
             return PyErr_NoMemory();
         }
@@ -2639,13 +2689,13 @@ math_hypot(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
     }
     result = vector_norm(nargs, coordinates, max, found_nan);
     if (coordinates != coord_on_stack) {
-        PyObject_Free(coordinates);
+        PyMem_Free(coordinates);
     }
     return PyFloat_FromDouble(result);
 
   error_exit:
     if (coordinates != coord_on_stack) {
-        PyObject_Free(coordinates);
+        PyMem_Free(coordinates);
     }
     return NULL;
 }
@@ -3095,7 +3145,7 @@ math.isclose -> bool
         maximum difference for being considered "close", regardless of the
         magnitude of the input values
 
-Determine whether two floating point numbers are close in value.
+Determine whether two floating-point numbers are close in value.
 
 Return True if a is close in value to b, and False otherwise.
 
@@ -3110,7 +3160,7 @@ only close to themselves.
 static int
 math_isclose_impl(PyObject *module, double a, double b, double rel_tol,
                   double abs_tol)
-/*[clinic end generated code: output=b73070207511952d input=f28671871ea5bfba]*/
+/*[clinic end generated code: output=b73070207511952d input=12d41764468bfdb8]*/
 {
     double diff = 0.0;
 
@@ -4095,6 +4145,7 @@ static PyMethodDef math_methods[] = {
     {"fabs",            math_fabs,      METH_O,         math_fabs_doc},
     MATH_FACTORIAL_METHODDEF
     MATH_FLOOR_METHODDEF
+    MATH_FMA_METHODDEF
     MATH_FMOD_METHODDEF
     MATH_FREXP_METHODDEF
     MATH_FSUM_METHODDEF
@@ -4135,6 +4186,7 @@ static PyMethodDef math_methods[] = {
 static PyModuleDef_Slot math_slots[] = {
     {Py_mod_exec, math_exec},
     {Py_mod_multiple_interpreters, Py_MOD_PER_INTERPRETER_GIL_SUPPORTED},
+    {Py_mod_gil, Py_MOD_GIL_NOT_USED},
     {0, NULL}
 };
 

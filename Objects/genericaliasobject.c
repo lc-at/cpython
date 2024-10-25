@@ -537,6 +537,8 @@ _Py_subs_parameters(PyObject *self, PyObject *args, PyObject *parameters, PyObje
 }
 
 PyDoc_STRVAR(genericalias__doc__,
+"GenericAlias(origin, args, /)\n"
+"--\n\n"
 "Represent a PEP 585 generic type\n"
 "\n"
 "E.g. for t = list[int], t.__origin__ is list and t.__args__ is (int,).");
@@ -559,6 +561,10 @@ ga_getitem(PyObject *self, PyObject *item)
     }
 
     PyObject *res = Py_GenericAlias(alias->origin, newargs);
+    if (res == NULL) {
+        Py_DECREF(newargs);
+        return NULL;
+    }
     ((gaobject *)res)->starred = alias->starred;
 
     Py_DECREF(newargs);

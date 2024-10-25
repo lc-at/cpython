@@ -256,26 +256,51 @@ PyComplex_FromDoubles(double real, double imag)
     return PyComplex_FromCComplex(c);
 }
 
+static PyObject * try_complex_special_method(PyObject *);
+
 double
 PyComplex_RealAsDouble(PyObject *op)
 {
+    double real = -1.0;
+
     if (PyComplex_Check(op)) {
-        return ((PyComplexObject *)op)->cval.real;
+        real = ((PyComplexObject *)op)->cval.real;
     }
     else {
-        return PyFloat_AsDouble(op);
+        PyObject* newop = try_complex_special_method(op);
+        if (newop) {
+            real = ((PyComplexObject *)newop)->cval.real;
+            Py_DECREF(newop);
+        } else if (!PyErr_Occurred()) {
+            real = PyFloat_AsDouble(op);
+        }
     }
+
+    return real;
 }
 
 double
 PyComplex_ImagAsDouble(PyObject *op)
 {
+    double imag = -1.0;
+
     if (PyComplex_Check(op)) {
-        return ((PyComplexObject *)op)->cval.imag;
+        imag = ((PyComplexObject *)op)->cval.imag;
     }
     else {
-        return 0.0;
+        PyObject* newop = try_complex_special_method(op);
+        if (newop) {
+            imag = ((PyComplexObject *)newop)->cval.imag;
+            Py_DECREF(newop);
+        } else if (!PyErr_Occurred()) {
+            PyFloat_AsDouble(op);
+            if (!PyErr_Occurred()) {
+                imag = 0.0;
+            }
+        }
     }
+
+    return imag;
 }
 
 static PyObject *
@@ -886,14 +911,17 @@ complex.__new__ as complex_new
     real as r: object(c_default="NULL") = 0
     imag as i: object(c_default="NULL") = 0
 
-Create a complex number from a real part and an optional imaginary part.
+Create a complex number from a string or numbers.
 
-This is equivalent to (real + imag*1j) where imag defaults to 0.
+If a string is given, parse it as a complex number.
+If a single number is given, convert it to a complex number.
+If the 'real' or 'imag' arguments are given, create a complex number
+with the specified real and imaginary components.
 [clinic start generated code]*/
 
 static PyObject *
 complex_new_impl(PyTypeObject *type, PyObject *r, PyObject *i)
-/*[clinic end generated code: output=b6c7dd577b537dc1 input=f4c667f2596d4fd1]*/
+/*[clinic end generated code: output=b6c7dd577b537dc1 input=ff4268dc540958a4]*/
 {
     PyObject *tmp;
     PyNumberMethods *nbr, *nbi = NULL;

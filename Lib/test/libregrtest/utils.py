@@ -5,6 +5,7 @@ import math
 import os.path
 import platform
 import random
+import re
 import shlex
 import signal
 import subprocess
@@ -12,7 +13,7 @@ import sys
 import sysconfig
 import tempfile
 import textwrap
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from test import support
 from test.support import os_helper
@@ -263,6 +264,12 @@ def clear_caches():
         for f in typing._cleanups:
             f()
 
+        import inspect
+        abs_classes = filter(inspect.isabstract, typing.__dict__.values())
+        for abc in abs_classes:
+            for obj in abc.__subclasses__() + [abc]:
+                obj._abc_caches_clear()
+
     try:
         fractions = sys.modules['fractions']
     except KeyError:
@@ -275,7 +282,16 @@ def clear_caches():
     except KeyError:
         pass
     else:
-        inspect._shadowed_dict_from_mro_tuple.cache_clear()
+        inspect._shadowed_dict_from_weakref_mro_tuple.cache_clear()
+        inspect._filesbymodname.clear()
+        inspect.modulesbyfile.clear()
+
+    try:
+        importlib_metadata = sys.modules['importlib.metadata']
+    except KeyError:
+        pass
+    else:
+        importlib_metadata.FastPath.__new__.cache_clear()
 
 
 def get_build_info():
@@ -284,28 +300,77 @@ def get_build_info():
 
     config_args = sysconfig.get_config_var('CONFIG_ARGS') or ''
     cflags = sysconfig.get_config_var('PY_CFLAGS') or ''
-    cflags_nodist = sysconfig.get_config_var('PY_CFLAGS_NODIST') or ''
+    cflags += ' ' + (sysconfig.get_config_var('PY_CFLAGS_NODIST') or '')
     ldflags_nodist = sysconfig.get_config_var('PY_LDFLAGS_NODIST') or ''
 
     build = []
 
     # --disable-gil
     if sysconfig.get_config_var('Py_GIL_DISABLED'):
-        build.append("nogil")
+        if not sys.flags.ignore_environment:
+            PYTHON_GIL = os.environ.get('PYTHON_GIL', None)
+            if PYTHON_GIL:
+                PYTHON_GIL = (PYTHON_GIL == '1')
+        else:
+            PYTHON_GIL = None
+
+        free_threading = "free_threading"
+        if PYTHON_GIL is not None:
+            free_threading = f"{free_threading} GIL={int(PYTHON_GIL)}"
+        build.append(free_threading)
 
     if hasattr(sys, 'gettotalrefcount'):
         # --with-pydebug
         build.append('debug')
 
-        if '-DNDEBUG' in (cflags + cflags_nodist):
+        if '-DNDEBUG' in cflags:
             build.append('without_assert')
     else:
         build.append('release')
 
         if '--with-assertions' in config_args:
             build.append('with_assert')
-        elif '-DNDEBUG' not in (cflags + cflags_nodist):
+        elif '-DNDEBUG' not in cflags:
             build.append('with_assert')
+
+    # --enable-experimental-jit
+    tier2 = re.search('-D_Py_TIER2=([0-9]+)', cflags)
+    if tier2:
+        tier2 = int(tier2.group(1))
+
+    if not sys.flags.ignore_environment:
+        PYTHON_JIT = os.environ.get('PYTHON_JIT', None)
+        if PYTHON_JIT:
+            PYTHON_JIT = (PYTHON_JIT != '0')
+    else:
+        PYTHON_JIT = None
+
+    if tier2 == 1:  # =yes
+        if PYTHON_JIT == False:
+            jit = 'JIT=off'
+        else:
+            jit = 'JIT'
+    elif tier2 == 3:  # =yes-off
+        if PYTHON_JIT:
+            jit = 'JIT'
+        else:
+            jit = 'JIT=off'
+    elif tier2 == 4:  # =interpreter
+        if PYTHON_JIT == False:
+            jit = 'JIT-interpreter=off'
+        else:
+            jit = 'JIT-interpreter'
+    elif tier2 == 6:  # =interpreter-off (Secret option!)
+        if PYTHON_JIT:
+            jit = 'JIT-interpreter'
+        else:
+            jit = 'JIT-interpreter=off'
+    elif '-D_Py_JIT' in cflags:
+        jit = 'JIT'
+    else:
+        jit = None
+    if jit:
+        build.append(jit)
 
     # --enable-framework=name
     framework = sysconfig.get_config_var('PYTHONFRAMEWORK')
@@ -327,6 +392,11 @@ def get_build_info():
     if support.check_cflags_pgo():
         # PGO (--enable-optimizations)
         optimizations.append('PGO')
+
+    if support.check_bolt_optimized():
+        # BOLT (--enable-bolt)
+        optimizations.append('BOLT')
+
     if optimizations:
         build.append('+'.join(optimizations))
 
@@ -340,6 +410,9 @@ def get_build_info():
     # --with-undefined-behavior-sanitizer
     if support.check_sanitizer(ub=True):
         sanitizers.append("UBSAN")
+    # --with-thread-sanitizer
+    if support.check_sanitizer(thread=True):
+        sanitizers.append("TSAN")
     if sanitizers:
         build.append('+'.join(sanitizers))
 
@@ -377,10 +450,19 @@ def get_temp_dir(tmp_dir: StrPath | None = None) -> StrPath:
                         # Python out of the source tree, especially when the
                         # source tree is read only.
                         tmp_dir = sysconfig.get_config_var('srcdir')
+                        if not tmp_dir:
+                            raise RuntimeError(
+                                "Could not determine the correct value for tmp_dir"
+                            )
                 tmp_dir = os.path.join(tmp_dir, 'build')
             else:
                 # WASI platform
                 tmp_dir = sysconfig.get_config_var('projectbase')
+                if not tmp_dir:
+                    raise RuntimeError(
+                        "sysconfig.get_config_var('projectbase') "
+                        f"unexpectedly returned {tmp_dir!r} on WASI"
+                    )
                 tmp_dir = os.path.join(tmp_dir, 'build')
 
                 # When get_temp_dir() is called in a worker process,
@@ -410,7 +492,7 @@ def get_work_dir(parent_dir: StrPath, worker: bool = False) -> StrPath:
     # the tests. The name of the dir includes the pid to allow parallel
     # testing (see the -j option).
     # Emscripten and WASI have stubbed getpid(), Emscripten has only
-    # milisecond clock resolution. Use randint() instead.
+    # millisecond clock resolution. Use randint() instead.
     if support.is_emscripten or support.is_wasi:
         nounce = random.randint(0, 1_000_000)
     else:
@@ -547,7 +629,7 @@ def is_cross_compiled():
     return ('_PYTHON_HOST_PLATFORM' in os.environ)
 
 
-def format_resources(use_resources: tuple[str, ...]):
+def format_resources(use_resources: Iterable[str]):
     use_resources = set(use_resources)
     all_resources = set(ALL_RESOURCES)
 
@@ -580,9 +662,10 @@ def display_header(use_resources: tuple[str, ...],
     print("== Python build:", ' '.join(get_build_info()))
     print("== cwd:", os.getcwd())
 
-    cpu_count = os.cpu_count()
+    cpu_count: object = os.cpu_count()
     if cpu_count:
-        process_cpu_count = os.process_cpu_count()
+        # The function is new in Python 3.13; mypy doesn't know about it yet:
+        process_cpu_count = os.process_cpu_count()  # type: ignore[attr-defined]
         if process_cpu_count and process_cpu_count != cpu_count:
             cpu_count = f"{process_cpu_count} (process) / {cpu_count} (system)"
         print("== CPU count:", cpu_count)
@@ -624,6 +707,7 @@ def display_header(use_resources: tuple[str, ...],
     asan = support.check_sanitizer(address=True)
     msan = support.check_sanitizer(memory=True)
     ubsan = support.check_sanitizer(ub=True)
+    tsan = support.check_sanitizer(thread=True)
     sanitizers = []
     if asan:
         sanitizers.append("address")
@@ -631,12 +715,15 @@ def display_header(use_resources: tuple[str, ...],
         sanitizers.append("memory")
     if ubsan:
         sanitizers.append("undefined behavior")
+    if tsan:
+        sanitizers.append("thread")
     if sanitizers:
         print(f"== sanitizers: {', '.join(sanitizers)}")
         for sanitizer, env_var in (
             (asan, "ASAN_OPTIONS"),
             (msan, "MSAN_OPTIONS"),
             (ubsan, "UBSAN_OPTIONS"),
+            (tsan, "TSAN_OPTIONS"),
         ):
             options= os.environ.get(env_var)
             if sanitizer and options is not None:
@@ -672,9 +759,38 @@ def get_signal_name(exitcode):
         except ValueError:
             pass
 
+    # Shell exit code (ex: WASI build)
+    if 128 < exitcode < 256:
+        signum = exitcode - 128
+        try:
+            return signal.Signals(signum).name
+        except ValueError:
+            pass
+
     try:
         return WINDOWS_STATUS[exitcode]
     except KeyError:
         pass
 
     return None
+
+
+ILLEGAL_XML_CHARS_RE = re.compile(
+    '['
+    # Control characters; newline (\x0A and \x0D) and TAB (\x09) are legal
+    '\x00-\x08\x0B\x0C\x0E-\x1F'
+    # Surrogate characters
+    '\uD800-\uDFFF'
+    # Special Unicode characters
+    '\uFFFE'
+    '\uFFFF'
+    # Match multiple sequential invalid characters for better efficiency
+    ']+')
+
+def _sanitize_xml_replace(regs):
+    text = regs[0]
+    return ''.join(f'\\x{ord(ch):02x}' if ch <= '\xff' else ascii(ch)[1:-1]
+                   for ch in text)
+
+def sanitize_xml(text):
+    return ILLEGAL_XML_CHARS_RE.sub(_sanitize_xml_replace, text)
