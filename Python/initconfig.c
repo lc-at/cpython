@@ -96,6 +96,7 @@ static const PyConfigSpec PYCONFIG_SPEC[] = {
     SPEC(pathconfig_warnings, UINT),
     SPEC(program_name, WSTR),
     SPEC(pythonpath_env, WSTR_OPT),
+    SPEC(language, WSTR_OPT),
     SPEC(home, WSTR_OPT),
     SPEC(platlibdir, WSTR),
     SPEC(sys_path_0, WSTR_OPT),
@@ -777,6 +778,7 @@ PyConfig_Clear(PyConfig *config)
 
     CLEAR(config->pycache_prefix);
     CLEAR(config->pythonpath_env);
+    CLEAR(config->language);
     CLEAR(config->home);
     CLEAR(config->program_name);
 
@@ -1639,6 +1641,14 @@ config_read_env_vars(PyConfig *config)
 
     if (config_get_env(config, "PYTHONSAFEPATH")) {
         config->safe_path = 1;
+    }
+
+    if (config->language == NULL) {
+        status = CONFIG_GET_ENV_DUP(config, &config->language,
+                                    L"PYTHONLANGUAGE", "PYTHONLANGUAGE");
+        if (_PyStatus_EXCEPTION(status)) {
+            return status;
+        }
     }
 
     return _PyStatus_OK();
@@ -3171,6 +3181,7 @@ _Py_DumpPathConfig(PyThreadState *tstate)
     const PyConfig *config = _PyInterpreterState_GetConfig(tstate->interp);
     DUMP_CONFIG("PYTHONHOME", home);
     DUMP_CONFIG("PYTHONPATH", pythonpath_env);
+    DUMP_CONFIG("PYTHONLANGUAGE", language);
     DUMP_CONFIG("program name", program_name);
     PySys_WriteStderr("  isolated = %i\n", config->isolated);
     PySys_WriteStderr("  environment = %i\n", config->use_environment);
