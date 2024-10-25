@@ -24,7 +24,7 @@ _PyErr_FormatV(PyThreadState *tstate, PyObject *exception,
 static const char*
 _PyErr_GetLocalizedException(PyThreadState* tstate, const char* message);
 
-static const char*
+const char*
 PyErr_GetLocalizedException(const char* message);
 
 void
@@ -1184,7 +1184,7 @@ static const char* _PyErr_GetLocalizedException(PyThreadState *tstate, const cha
     return PyUnicode_AsUTF8(entry);
 }
 
-static const char* PyErr_GetLocalizedException(const char* message){
+const char* PyErr_GetLocalizedException(const char* message){
     PyThreadState *tstate = _PyThreadState_GET();
     return _PyErr_GetLocalizedException(tstate, message);
 }
