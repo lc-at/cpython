@@ -747,8 +747,10 @@ def _script():
 
 # Localizations
 sys.localized_exceptions = {}; sys.localized_exceptions['id'] = {}
+
 sys.localized_exceptions['id']["'%.100s' object has no attribute '%U'"] = "Objek '%.100s' tidak memiliki atribut '%U'"
 sys.localized_exceptions['id']['division by zero'] = "pembagian dengan nol"
-
+sys.localized_exceptions['id']["unsupported operand type(s) for %.100s: '%.100s' and '%.100s'"] = "tipe operan tidak didukung untuk %.100s: '%.100s' dan '%.100s'"
+sys.localized_exceptions['id']["unmatched '%c'"] = "'%c' tidak cocok"
 if __name__ == '__main__':
     _script()

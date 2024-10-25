@@ -1177,7 +1177,6 @@ static const char* _PyErr_GetLocalizedException(PyThreadState *tstate, const cha
     // Get entry for string
     PyObject* entry = PyDict_GetItemString(lang_dict, message);
     if (entry == NULL) {
-        Py_DECREF(lang_dict);
         return message;
     }
 
