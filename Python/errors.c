@@ -24,6 +24,9 @@ _PyErr_FormatV(PyThreadState *tstate, PyObject *exception,
 static const char*
 _PyErr_GetLocalizedException(PyThreadState* tstate, const char* message);
 
+static const char*
+PyErr_GetLocalizedException(const char* message);
+
 void
 _PyErr_SetRaisedException(PyThreadState *tstate, PyObject *exc)
 {
@@ -1154,7 +1157,7 @@ static const char* _PyErr_GetLocalizedException(PyThreadState *tstate, const cha
     if (tstate->interp->config.language == NULL)
         return message;
 
-    PyObject* exception_dict = PySys_GetObject("localized_exceptions");
+    PyObject* exception_dict = PySys_GetObject("localized_exceptions"); // Borrowed ref
     if (exception_dict == NULL) {
         return message;
     }
@@ -1174,10 +1177,16 @@ static const char* _PyErr_GetLocalizedException(PyThreadState *tstate, const cha
     // Get entry for string
     PyObject* entry = PyDict_GetItemString(lang_dict, message);
     if (entry == NULL) {
+        Py_DECREF(lang_dict);
         return message;
     }
 
     return PyUnicode_AsUTF8(entry);
+}
+
+static const char* PyErr_GetLocalizedException(const char* message){
+    PyThreadState *tstate = _PyThreadState_GET();
+    return _PyErr_GetLocalizedException(tstate, message);
 }
 
 static PyObject *

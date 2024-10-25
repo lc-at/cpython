@@ -19,7 +19,7 @@ _syntaxerror_range(struct tok_state *tok, const char *format,
         return ERRORTOKEN;
     }
     PyObject *errmsg, *errtext, *args;
-    errmsg = PyUnicode_FromFormatV(format, vargs);
+    errmsg = PyUnicode_FromFormatV(PyErr_GetLocalizedException(format), vargs);
     if (!errmsg) {
         goto error;
     }

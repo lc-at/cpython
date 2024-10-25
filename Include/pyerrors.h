@@ -188,6 +188,7 @@ PyAPI_FUNC(PyObject *) PyErr_FormatV(
     const char *format,
     va_list vargs);
 #endif
+PyAPI_FUNC(const char*) PyErr_GetLocalizedException(const char* message);
 
 #ifdef MS_WINDOWS
 PyAPI_FUNC(PyObject *) PyErr_SetFromWindowsErrWithFilename(
