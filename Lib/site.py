@@ -667,5 +667,10 @@ def _script():
         print(textwrap.dedent(help % (sys.argv[0], os.pathsep)))
         sys.exit(10)
 
+# Localizations
+sys.localized_exceptions = {}; sys.localized_exceptions['id'] = {}
+sys.localized_exceptions['id']["'%.100s' object has no attribute '%U'"] = "Objek '%.100s' tidak memiliki atribut '%U'"
+sys.localized_exceptions['id']['division by zero'] = "pembagian dengan nol"
+
 if __name__ == '__main__':
     _script()
